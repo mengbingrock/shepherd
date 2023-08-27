@@ -537,7 +537,7 @@ void transformer(int token, int pos, Config* p, RunState* s, TransformerWeights*
 
 }
 
-int main(int argc, char** argv) {
+int inference(int argc, char* argv) {
 
     char* checkpoint = "stories15M.bin";
     char* tokenizer = "tokenizer.bin";
@@ -547,8 +547,9 @@ int main(int argc, char** argv) {
     int steps = 256;
     char* prompt = NULL;
 
-    if(argc >= 2) checkpoint = argv[1];
+    if(argc >= 2) checkpoint = argv;
 
+    /*
     for(int i = 2; i < argc; i+=2 ) {
         if(argv[i][1] == 't') temperature = atof(argv[i+1]);
         else if (argv[i][1] == 'p') topp = atof(argv[i+1]);
@@ -557,6 +558,7 @@ int main(int argc, char** argv) {
         else if (argv[i][1] == 'i') prompt = argv[i+1];
         else if (argv[i][1] == 'z') tokenizer = argv[i+1];
     }
+    */
     if (rng_seed == 0) rng_seed = (unsigned int) time(NULL);
 
 Config config;
@@ -693,4 +695,8 @@ while (pos < steps) {
     return 0;
 
 
+}
+int main(int argc, char **argv) {
+    inference(argc, argv[1]);
+    return 0;
 }
