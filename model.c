@@ -268,9 +268,278 @@ void bpe_encode(char *text, char **vocab, float *vocab_scores, int vocab_size, u
 
 
 
+void rmsnorm(float* o, float* x, float* weight, int size) {
+    // calculate sum of squares
+    float ss = 0.0f;
+    for (int j = 0; j < size; j++) {
+        ss += x[j] * x[j];
+    }
+    ss /= size;
+    ss += 1e-5f;
+    ss = 1.0f / sqrtf(ss);
+    // normalize and scale
+    for (int j = 0; j < size; j++) {
+        o[j] = weight[j] * (ss * x[j]);
+    }
+}
+
+void matmul(float* xout, float* x, float* w, int n, int d) {
+    // W (d,n) @ x (n,) -> xout (d,)
+    // by far the most amount of time is spent inside this little function
+    int i;
+    //#pragma omp parallel for private(i)
+    for (i = 0; i < d; i++) {
+        float val = 0.0f;
+        for (int j = 0; j < n; j++) {
+            val += w[i * n + j] * x[j];
+        }
+        xout[i] = val;
+    }
+}
+
+
+void softmax(float* x, int size) {
+    // find max value (for numerical stability)
+    float max_val = x[0];
+    for (int i = 1; i < size; i++) {
+        if (x[i] > max_val) {
+            max_val = x[i];
+        }
+    }
+    // exp and sum
+    float sum = 0.0f;
+    for (int i = 0; i < size; i++) {
+        x[i] = expf(x[i] - max_val);
+        sum += x[i];
+    }
+    // normalize
+    for (int i = 0; i < size; i++) {
+        x[i] /= sum;
+    }
+}
+
+// ----------------------------------------------------------------------------
+// sampling can be done in a few ways: greedy argmax, sampling, top-p sampling
+
+int argmax(float* probabilities, int n) {
+    // return the index that has the highest probability
+    int max_i = 0;
+    float max_p = probabilities[0];
+    for (int i = 1; i < n; i++) {
+        if (probabilities[i] > max_p) {
+            max_i = i;
+            max_p = probabilities[i];
+        }
+    }
+    return max_i;
+}
+
+
+unsigned long long rng_seed;
+unsigned int random_u32() {
+    // xorshift rng: https://en.wikipedia.org/wiki/Xorshift#xorshift.2A
+    rng_seed ^= rng_seed >> 12;
+    rng_seed ^= rng_seed << 25;
+    rng_seed ^= rng_seed >> 27;
+    return (rng_seed * 0x2545F4914F6CDD1Dull) >> 32;
+}
+float random_f32() { // random float32 in [0,1)
+    return (random_u32() >> 8) / 16777216.0f;
+}
+
+
+long time_in_ms() {
+    // return time in milliseconds, for benchmarking the model speed
+    struct timespec time;
+    clock_gettime(CLOCK_REALTIME, &time);
+    return time.tv_sec * 1000 + time.tv_nsec / 1000000;
+}
+
+
+int sample(float* probabilities, int n) {
+    // sample index from probabilities (they must sum to 1!)
+    float r = random_f32();
+    float cdf = 0.0f;
+    for (int i = 0; i < n; i++) {
+        cdf += probabilities[i];
+        if (r < cdf) {
+            return i;
+        }
+    }
+    return n - 1; // in case of rounding errors
+}
+
+int compare(const void* a, const void* b) {
+    ProbIndex* a_ = (ProbIndex*) a;
+    ProbIndex* b_ = (ProbIndex*) b;
+    if (a_->prob > b_->prob) return -1;
+    if (a_->prob < b_->prob) return 1;
+    return 0;
+}
+
+int sample_topp(float* probabilities, int n, float topp, ProbIndex* probindex) {
+    // top-p sampling (or "nucleus sampling") samples from the smallest set of
+    // tokens that exceed probability topp. This way we never sample tokens that
+    // have very low probabilities and are less likely to go "off the rails".
+
+    int n0 = 0;
+    // quicksort indices in descending order of probabilities
+    // values smaller than (1 - topp) / (n - 1) cannot be part of the result
+    // so for efficiency we crop these out as candidates before sorting
+    const float cutoff = (1.0f - topp) / (n - 1);
+    for (int i = 0; i < n; i++) {
+        if (probabilities[i] >= cutoff) {
+            probindex[n0].index = i;
+            probindex[n0].prob = probabilities[i];
+            n0++;
+        }
+    }
+    qsort(probindex, n0, sizeof(ProbIndex), compare);
+
+    // truncate the list where cumulative probability exceeds topp
+    float cumulative_prob = 0.0f;
+    int last_idx = n0 - 1; // in case of rounding errors consider all elements
+    for (int i = 0; i < n0; i++) {
+        cumulative_prob += probindex[i].prob;
+        if (cumulative_prob > topp) {
+            last_idx = i;
+            break; // we've exceeded topp by including last_idx
+        }
+    }
+
+    // sample from the truncated list
+    float r = random_f32() * cumulative_prob;
+    float cdf = 0.0f;
+    for (int i = 0; i <= last_idx; i++) {
+        cdf += probindex[i].prob;
+        if (r < cdf) {
+            return probindex[i].index;
+        }
+    }
+    return probindex[last_idx].index; // in case of rounding errors
+}
+
+
+
+
+
+void transformer(int token, int pos, Config* p, RunState* s, TransformerWeights* w) {
+    float* x = s->x;
+    int dim = p->dim;
+    int kv_dim = (dim * p->n_kv_heads) / p->n_kv_heads;
+    int kv_mul = p->n_heads / p->n_kv_heads;
+    int hidden_dim = p->hidden_dim;
+    int head_size = dim / p->n_heads;
+
+    float* content_row = &(w->token_embedding_table[dim*token]);
+    memcpy(x, content_row, dim*sizeof(float));
+
+    for (int l = 0; l < p->n_layers; l++) {
+
+        rmsnorm(s->xb, x, w->rms_att_weight + l * dim, dim);
+
+
+        matmul(s->q, s->xb, w->wq + l*dim*dim, dim, dim);
+        matmul(s->k, s->xb, w->wk + l*dim*kv_dim, dim, kv_dim);
+        matmul(s->v, s->xb, w->wv + l*dim*kv_dim, dim, kv_dim);
+
+
+        // RoPE relative positional encoding: complex-valued rotate q and k in each head
+        for (int i = 0; i < dim; i+=2) {
+            int head_dim = i % head_size;
+            float freq = 1.0f / powf(10000.0f, head_dim / (float)head_size);
+            float val = pos * freq;
+            float fcr = cosf(val);
+            float fci = sinf(val);
+            int rotn = i < kv_dim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
+            for (int v = 0; v < rotn; v++) {
+                float* vec = v == 0 ? s->q : s->k; // the vector to rotate (query or key)
+                float v0 = vec[i];
+                float v1 = vec[i+1];
+                vec[i]   = v0 * fcr - v1 * fci;
+                vec[i+1] = v0 * fci + v1 * fcr;
+            }
+        }
+
+
+        int layeroffset = l*p->seq_len * kv_dim;
+        float* key_cache_row = s->key_cache + layeroffset + pos * kv_dim;
+        float* value_cache_row = s->value_cache + layeroffset + pos * kv_dim;
+        memcpy(key_cache_row, s->k, kv_dim *sizeof(float));
+        memcpy(value_cache_row, s->v, kv_dim * sizeof(float));
+
+        int h;
+
+        for (h = 0; h < p->n_heads; h++) {
+            float* q = s->q + h * head_size;
+            float* att = s->att + h * p->seq_len;
+            for (int t = 0; t <= pos; t++ ) {
+                float* k = s->key_cache + layeroffset + t * kv_dim + (h/kv_mul) * head_size;
+                float score = 0.0f;
+                for (int i = 0; i < head_size; i++) {
+                    score += q[i] * k[i];
+                }
+                score /= sqrtf(head_size);
+                att[t] = score;
+            }
+
+            softmax(att, pos + 1);
+
+            float* xb = s->xb + h * head_size;
+            memset(xb, 0, head_size * sizeof(float));
+            for (int t = 0; t <= pos; t ++) {
+                float* v = s->value_cache + layeroffset + t * kv_dim + (h / kv_mul) * head_size;
+
+                for (int i = 0; i < head_size; i ++ ) {
+                    xb[i] += att[t] * v[i];
+                }
+            }
+        }
+
+        matmul(s->xb2, s->xb, w->wo + l*dim*dim, dim, dim);
+
+        for (int i=0; i < dim; i++) x[i] += s->xb2[i];
+
+        // ffn rmsnorm
+        rmsnorm(s->xb, x, w->rms_ffn_weight + l*dim, dim);
+
+        // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
+        // first calculate self.w1(x) and self.w3(x)
+        matmul(s->hb, s->xb, w->w1 + l*dim*hidden_dim, dim, hidden_dim);
+        matmul(s->hb2, s->xb, w->w3 + l*dim*hidden_dim, dim, hidden_dim);
+
+        // F.silu; silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
+        for (int i = 0; i < hidden_dim; i++) {
+            s->hb[i] = s->hb[i] * (1.0f / (1.0f + expf(-s->hb[i])));
+        }
+
+        // elementwise multiply with w3(x)
+        for (int i = 0; i < hidden_dim; i++) {
+            s->hb[i] = s->hb[i] * s->hb2[i];
+        }
+
+        // final matmul to get the output of the ffn
+        matmul(s->xb, s->hb, w->w2 + l*dim*hidden_dim, hidden_dim, dim);
+
+        // residual connection
+        for (int i = 0; i < dim; i++) {
+            x[i] += s->xb[i];
+        }
+    }
+
+    // final rmsnorm
+    rmsnorm(x, x, w->rms_final_weight, dim);
+
+    // classifier into logits
+    matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
+
+
+
+}
+
 int main(int argc, char** argv) {
 
-    char* checkpoint = "stories15M.pt";
+    char* checkpoint = "stories15M.bin";
     char* tokenizer = "tokenizer.bin";
     float temperature = 1.0f;
     float topp = 0.9f;
@@ -322,20 +591,20 @@ float* vocab_scores = (float*)malloc(config.vocab_size * sizeof(float));
 unsigned int max_token_length;
 
 {
-FILE* file = fopen(tokenizer, "rb");
-if (!file) { fprintf(stderr, "couldn't load %s\n", tokenizer); return 1; }
-if (fread(&max_token_length, sizeof(int), 1, file) != 1) { fprintf(stderr, "failed read\n"); return 1; }
-int len;
-for (int i = 0; i < config.vocab_size; i++) {
-    if (fread(vocab_scores + i, sizeof(float), 1, file) != 1) { fprintf(stderr, "failed read\n"); return 1;}
+    FILE* file = fopen(tokenizer, "rb");
+    if (!file) { fprintf(stderr, "couldn't load %s\n", tokenizer); return 1; }
+    if (fread(&max_token_length, sizeof(int), 1, file) != 1) { fprintf(stderr, "failed read\n"); return 1; }
+    int len;
+    for (int i = 0; i < config.vocab_size; i++) {
+        if (fread(vocab_scores + i, sizeof(float), 1, file) != 1) { fprintf(stderr, "failed read\n"); return 1;}
 
-    if (fread(&len, sizeof(int), 1, file) != 1) { fprintf(stderr, "failed read\n"); return 1; }
+        if (fread(&len, sizeof(int), 1, file) != 1) { fprintf(stderr, "failed read\n"); return 1; }
 
-    vocab[i] = (char *)malloc(len + 1);
-    if (fread(vocab[i], len, 1, file) != 1) { fprintf(stderr, "failed read\n"); return 1; }
-    vocab[i][len] = '\0'; // add the string terminating token
-    }
-fclose(file);
+        vocab[i] = (char *)malloc(len + 1);
+        if (fread(vocab[i], len, 1, file) != 1) { fprintf(stderr, "failed read\n"); return 1; }
+        vocab[i][len] = '\0'; // add the string terminating token
+        }
+    fclose(file);
 }
 
 
@@ -356,18 +625,72 @@ long start = 0;
 int next;
 int token = 1;
 int pos = 0;
-/*
+
+
 while (pos < steps) {
+    transformer(token, pos, &config, &state, &weights);
+
+    if(pos < num_prompt_tokens) {
+        next = prompt_tokens[pos];
+        continue;
+    }
+
+    if(temperature == 0.0f) {
+        next = argmax(state.logits, config.vocab_size);
+    }
+    else {
+
+        for (int q = 0; q < config.vocab_size; q++) {state.logits[q] /= temperature; }
+
+        softmax(state.logits, config.vocab_size);
+        if (topp <= 0 || topp >= 1) {
+            next = sample(state.logits, config.vocab_size);
+        }
+        else {
+
+            next = sample_topp(state.logits, config.vocab_size, topp, state.probindex);
+        }
+
+    }
+
+    pos ++;
 
 
+    if (next == 1) break;
 
+            // following BOS (1) token, sentencepiece decoder strips any leading whitespace (see PR #89)
+        char *token_str = (token == 1 && vocab[next][0] == ' ') ? vocab[next]+1 : vocab[next];
+        // careful, some tokens designate raw bytes, and look like e.g. '<0x01>'
+        unsigned char byte_val;
+        if (sscanf(token_str, "<0x%02hhX>", &byte_val) == 1) {
+            // ok this token is a raw byte token, carefuly to only print printable chars or whitespace
+            // some of the other bytes can be various control codes, backspace, etc. => skip
+            if (isprint(byte_val) || isspace(byte_val)) {
+                char byte_piece[2];
+                byte_piece[0] = byte_val;
+                byte_piece[1] = '\0';
+                printf("%s", byte_piece);
+            }
+        } else {
+            printf("%s", token_str);
+        }
+        fflush(stdout);
+        token = next;
 
+        // init the timer here because the first iteration can be slower
+        if (start == 0) { start = time_in_ms(); }
+    }
+    printf("\n");
 
-}
-
-*/
-
-
+    // memory and file handles cleanup
+    free_run_state(&state);
+    for (int i = 0; i < config.vocab_size; i++) { free(vocab[i]); }
+    free(vocab);
+    free(vocab_scores);
+    if (prompt_tokens != NULL) free(prompt_tokens);
+    if (data != MAP_FAILED) munmap(data, file_size);
+    if (fd != -1) close(fd);
+    return 0;
 
 
 }
