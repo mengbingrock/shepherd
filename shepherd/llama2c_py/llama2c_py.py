@@ -53,6 +53,7 @@ def _load_shared_library(lib_base_name: str):
 
     # Try to load the shared library, handling potential errors
     for _lib_path in _lib_paths:
+        print("_lib_path = ", _lib_path)
         if _lib_path.exists():
             try:
                 return ctypes.CDLL(str(_lib_path), **cdll_args)
@@ -80,7 +81,7 @@ def inference(argc: c_int, argv: c_char_p):
 #_lib.inference.argtypes = [c_int, c_char_p]
 #_lib.inference.restype = c_int
 
-
-inference(2 ,bytes( "stories15M.bin", encoding = 'utf-8'))
+if __name__ == "__main__":
+    inference(2 ,bytes( "stories15M.bin", encoding = 'utf-8'))
 
 

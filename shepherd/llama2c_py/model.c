@@ -660,27 +660,27 @@ while (pos < steps) {
 
     if (next == 1) break;
 
-            // following BOS (1) token, sentencepiece decoder strips any leading whitespace (see PR #89)
-        char *token_str = (token == 1 && vocab[next][0] == ' ') ? vocab[next]+1 : vocab[next];
-        // careful, some tokens designate raw bytes, and look like e.g. '<0x01>'
-        unsigned char byte_val;
-        if (sscanf(token_str, "<0x%02hhX>", &byte_val) == 1) {
-            // ok this token is a raw byte token, carefuly to only print printable chars or whitespace
-            // some of the other bytes can be various control codes, backspace, etc. => skip
-            if (isprint(byte_val) || isspace(byte_val)) {
-                char byte_piece[2];
-                byte_piece[0] = byte_val;
-                byte_piece[1] = '\0';
-                printf("%s", byte_piece);
-            }
-        } else {
-            printf("%s", token_str);
+    // following BOS (1) token, sentencepiece decoder strips any leading whitespace (see PR #89)
+    char *token_str = (token == 1 && vocab[next][0] == ' ') ? vocab[next]+1 : vocab[next];
+    // careful, some tokens designate raw bytes, and look like e.g. '<0x01>'
+    unsigned char byte_val;
+    if (sscanf(token_str, "<0x%02hhX>", &byte_val) == 1) {
+        // ok this token is a raw byte token, carefuly to only print printable chars or whitespace
+        // some of the other bytes can be various control codes, backspace, etc. => skip
+        if (isprint(byte_val) || isspace(byte_val)) {
+            char byte_piece[2];
+            byte_piece[0] = byte_val;
+            byte_piece[1] = '\0';
+            printf("%s", byte_piece);
         }
-        fflush(stdout);
-        token = next;
+    } else {
+        printf("%s", token_str);
+    }
+    fflush(stdout);
+    token = next;
 
-        // init the timer here because the first iteration can be slower
-        if (start == 0) { start = time_in_ms(); }
+    // init the timer here because the first iteration can be slower
+    if (start == 0) start = time_in_ms();
     }
     printf("\n");
 

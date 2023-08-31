@@ -4,9 +4,9 @@ CC = gcc
 
 # the most basic way of building that is most likely to work on most systems
 .PHONY: run
-run: model.c
-	$(CC) -O3 -o run model.c -lm
-	$(CC) -fPIC -o libmodel.so model.c
+run: shepherd/llama2c_py/model.c
+	$(CC) -O3 -o shepherd/llama2c_py/run shepherd/llama2c_py/model.c -lm
+	$(CC) -fPIC -o shepherd/llama2c_py/libmodel.so shepherd/llama2c_py/model.c
 
 # useful for a debug build, can then e.g. analyze with valgrind, example:
 # $ valgrind --leak-check=full ./run out/model.bin -n 3
