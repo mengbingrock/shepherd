@@ -299,9 +299,147 @@ class RouteErrorHandler(APIRoute):
 
 router = APIRouter(route_class=RouteErrorHandler)
 
+class ModelData(TypedDict):
+    id: str
+    object: Literal["model"]
+    owned_by: str
+    permissions: List[str]
+
+
+
+class ModelList(TypedDict):
+    object: Literal["list"]
+    data: List[ModelData]
+
+
+@router.get("/v1/models")
+async def get_models() -> ModelList:
+    #assert llama is not None
+    print("__func__") 
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "12321",
+                "object": "model",
+                "owned_by": "me",
+                "permissions": [],
+            }
+        ],
+    }
+
+@router.get("/")
+async def root():
+    return {"message": "Hello World"}
+
+
+
+
+@router.post(
+    "/v1/completions",
+)
+
+
+class CreateCompletionRequest(BaseModel):
+    prompt: Union[str, List[str]] = Field(
+        default="", description="The prompt to generate completions for."
+    )
+    suffix: Optional[str] = Field(
+        default=None,
+        description="A suffix to append to the generated text. If None, no suffix is appended. Useful for chatbots.",
+    )
+    max_tokens: int = max_tokens_field
+    temperature: float = temperature_field
+    top_p: float = top_p_field
+    mirostat_mode: int = mirostat_mode_field
+    mirostat_tau: float = mirostat_tau_field
+    mirostat_eta: float = mirostat_eta_field
+    echo: bool = Field(
+        default=False,
+        description="Whether to echo the prompt in the generated text. Useful for chatbots.",
+    )
+    stop: Optional[Union[str, List[str]]] = stop_field
+    stream: bool = stream_field
+    logprobs: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="The number of logprobs to generate. If None, no logprobs are generated.",
+    )
+    presence_penalty: Optional[float] = presence_penalty_field
+    frequency_penalty: Optional[float] = frequency_penalty_field
+    logit_bias: Optional[Dict[str, float]] = Field(None)
+    logprobs: Optional[int] = Field(None)
+
+    # ignored or currently unsupported
+    model: Optional[str] = model_field
+    n: Optional[int] = 1
+    best_of: Optional[int] = 1
+    user: Optional[str] = Field(default=None)
+
+    # llama.cpp specific parameters
+    top_k: int = top_k_field
+    repeat_penalty: float = repeat_penalty_field
+    logit_bias_type: Optional[Literal["input_ids", "tokens"]] = Field(None)
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "prompt": "\n\n### Instructions:\nWhat is the capital of France?\n\n### Response:\n",
+                    "stop": ["\n", "###"],
+                }
+            ]
+        }
+    }
+
+
+
+async def create_completion(
+    request: Request,
+    body: CreateCompletionRequest,
+    llama: llama_cpp.Llama = Depends(get_llama),
+) -> llama_cpp.Completion:
+    if isinstance(body.prompt, list):
+        assert len(body.prompt) <= 1
+        body.prompt = body.prompt[0] if len(body.prompt) > 0 else ""
+
+    kwargs = body.model_dump(exclude=exclude)
+
+    print("__func__: kwargs = ", kwargs)
+
+    iterator_or_completion: Union[llama_cpp.Completion, Iterator[
+        llama_cpp.CompletionChunk
+    ]] = await run_in_threadpool(llama, **kwargs)
+
+    if isinstance(iterator_or_completion, Iterator):
+        print("__func__: iterator_or_completion = Iterator")
+        # EAFP: It's easier to ask for forgiveness than permission
+        first_response = await run_in_threadpool(next, iterator_or_completion)
+
+        # If no exception was raised from first_response, we can assume that
+        # the iterator is valid and we can use it to stream the response.
+        def iterator() -> Iterator[llama_cpp.CompletionChunk]:
+            yield first_response
+            yield from iterator_or_completion
+
+        send_chan, recv_chan = anyio.create_memory_object_stream(10)
+        return EventSourceResponse(
+            recv_chan, data_sender_callable=partial(  # type: ignore
+                get_event_publisher,
+                request=request,
+                inner_send_chan=send_chan,
+                iterator=iterator(),
+            )
+        )
+    else:
+        print("iterator_or_completion is not Iterator= ", iterator_or_completion)
+        return iterator_or_completion
+
+
 settings: Optional[Settings] = None
 llama = None #: Optional[llama2c_py.inference] = None
 
+from llama2c_py.llama2c_py import *
 
 def create_app(settings: Optional[Settings] = None):
     if settings is None:
@@ -322,8 +460,9 @@ def create_app(settings: Optional[Settings] = None):
     print("setting ===============")
     print(settings)
     # para 0 is argc, remove later
-    llama = llama2c_py.inference(2, model_path=settings.model)
+    print("model_path=", settings.model)
+    #llama = llama2c_py.llama2c_py.inference(2, model_path=settings.model)
 
-
+    return app
 
 
