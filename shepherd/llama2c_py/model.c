@@ -537,9 +537,9 @@ void transformer(int token, int pos, Config* p, RunState* s, TransformerWeights*
 
 }
 
-int inference(int argc, char* argv) {
+char* inference(char* argv) {
 
-    char* checkpoint = "stories15M.bin";
+    char* checkpoint = "/Users/mengbing/WorkSync/Git/shepherd/shepherd/llama2c_py/stories15M.bin";
     char* tokenizer = "tokenizer.bin";
     float temperature = 1.0f;
     float topp = 0.9f;
@@ -547,7 +547,7 @@ int inference(int argc, char* argv) {
     int steps = 256;
     char* prompt = NULL;
 
-    if(argc >= 2) checkpoint = argv;
+    //if(argc >= 2) checkpoint = argv;
 
     /*
     for(int i = 2; i < argc; i+=2 ) {
@@ -629,6 +629,13 @@ int token = 1;
 int pos = 0;
 
 
+printf("max_token_length=%i \n", max_token_length);
+printf("max_seq_len=%i\n", config.seq_len);
+char* ret_token_str = (char*)malloc((config.seq_len* max_token_length) * sizeof(char));
+
+
+
+int cnt = 0;
 while (pos < steps) {
     transformer(token, pos, &config, &state, &weights);
 
@@ -672,9 +679,17 @@ while (pos < steps) {
             byte_piece[0] = byte_val;
             byte_piece[1] = '\0';
             printf("%s", byte_piece);
+            //ret_token_str[cnt++] = byte_val;
+            //ret_token_str[cnt++] = '\0';
         }
     } else {
-        printf("%s", token_str);
+        printf("%s\n", token_str);
+        size_t destination_size = strlen(token_str);
+        printf("count = %i, destination_size= %i \n", cnt, destination_size*sizeof(char));
+        memcpy(&ret_token_str[cnt], token_str, destination_size);
+        //ret_token_str[cnt+destination_size+1] = "k";
+        cnt = cnt + (destination_size);
+        //ret_token_str[destination_size+1] = '\0';
     }
     fflush(stdout);
     token = next;
@@ -682,21 +697,27 @@ while (pos < steps) {
     // init the timer here because the first iteration can be slower
     if (start == 0) start = time_in_ms();
     }
-    printf("\n");
 
-    // memory and file handles cleanup
-    free_run_state(&state);
-    for (int i = 0; i < config.vocab_size; i++) { free(vocab[i]); }
-    free(vocab);
-    free(vocab_scores);
-    if (prompt_tokens != NULL) free(prompt_tokens);
-    if (data != MAP_FAILED) munmap(data, file_size);
-    if (fd != -1) close(fd);
-    return 0;
+printf("\n");
+//for(int i =0; i < cnt; i++) printf("==total token string = %s", ret_token_str[i]);
+//fflush(stdout);
+// memory and file handles cleanup
+free_run_state(&state);
+for (int i = 0; i < config.vocab_size; i++) { free(vocab[i]); }
+free(vocab);
+free(vocab_scores);
+//free(ret_token_str);
+if (prompt_tokens != NULL) free(prompt_tokens);
+if (data != MAP_FAILED) munmap(data, file_size);
+if (fd != -1) close(fd);
 
 
+return ret_token_str;
 }
+
+
+
 int main(int argc, char **argv) {
-    inference(argc, argv[1]);
+    inference(argv[1]);
     return 0;
 }

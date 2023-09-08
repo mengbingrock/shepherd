@@ -73,12 +73,12 @@ _lib_base_name = "model"
 _lib = _load_shared_library(_lib_base_name)
 
 # LLAMA_API struct llama_context_params llama_context_default_params();
-def inference(argc: c_int, argv: c_char_p):
-    return _lib.inference(argc, argv)
+def inference(argv: c_char_p):
+    return _lib.inference(argv)
 
 #_lib.inference.argtypes = [c_int, c_char_p]
-#_lib.inference.restype = c_int
+_lib.inference.restype = c_char_p
 
 if __name__ == "__main__":
-    inference(2 ,bytes( "stories15M.bin", encoding = 'utf-8'))
+    inference(bytes( "stories15M.bin", encoding = 'utf-8'))
 
